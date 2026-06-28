@@ -1,18 +1,20 @@
 use axum::{
-    extract::State,
+    extract::{ Json, Path },
     routing::{get, put},
-    Json,
     Router,
 };
 
 use serde::Deserialize;
+
 use crate::{
-    auth::admin::Admin,
     app::AppState,
+    auth::admin::Admin,
+    error::AppError,
     models::Asset,
+    repository::Repository,
 };
 
-pub fn router() -> Router<AppState>{
+pub fn router() -> Router<AppState> {
     Router::new()
         .route("/assets", get(list_assets).post(create_asset))
         .route("/assets/update", put(update_asset))
@@ -20,10 +22,11 @@ pub fn router() -> Router<AppState>{
 
 #[tracing::instrument(skip_all)]
 async fn list_assets(
-    State(state): State<AppState>,
-) -> Json<Vec<Asset>> {
-    let assets = state.assets.lock().await;
-    Json(assets.values().cloned().collect::<Vec<_>>())
+    repository: Repository,
+) -> Result<Json<Vec<Asset>>, AppError> {
+    let assets = repository.list_assets().await?;
+
+    Ok(Json(assets))
 }
 
 #[derive(Deserialize)]
@@ -33,54 +36,41 @@ struct CreateAssetRequest {
 }
 
 #[tracing::instrument(skip_all)]
-#[axum::debug_handler]
+#[axum::debug_handler(state = AppState)]
 async fn create_asset(
     _admin: Admin,
-    State(state): State<AppState>,
+    repository:Repository,
     Json(request): Json<CreateAssetRequest>,
-) -> Json<Asset> {
-    let mut assets = state.assets.lock().await;
+) -> Result<Json<Asset>, AppError> {
+    let asset = repository
+        .create_asset(request.name, request.unit_value)
+        .await?;
 
-    let id = assets.iter().map(|(_, a)| a.id).max().unwrap_or(0) + 1;
-
-    let new_asset = Asset {
-        id,
-        name: request.name,
-        unit_value: request.unit_value,
-    };
-
-    assets.insert(id, new_asset.clone());
-
-    Json(new_asset)
+    Ok(Json(asset))
 }
 
 #[derive(Deserialize)]
 struct UpdateAssetRequest {
-    id: i64,
+    id: i32,
     name: Option<String>,
     unit_value: Option<f64>,
 }
 
 #[tracing::instrument(skip_all)]
-#[axum::debug_handler]
+#[axum::debug_handler(state = AppState)]
 async fn update_asset(
     _admin: Admin,
-    State(state): State<AppState>,
+    repository:Repository,
     Json(request): Json<UpdateAssetRequest>,
-) -> Result<Json<Asset>, &'static str> {
-    let mut assets = state.assets.lock().await;
+) -> Result<Json<Asset>, AppError> {
+    let asset = repository
+        .update_asset(
+            request.id,
+            request.name,
+            request.unit_value,
+        )
+        .await?
+        .ok_or(AppError::AssetDoesNotExist)?;
 
-    let existing = assets
-        .get_mut(&request.id)
-        .ok_or("Asset does not exist")?;
-
-    if let Some(new_name) = request.name {
-        existing.name = new_name;
-    }
-
-    if let Some(new_value) = request.unit_value {
-        existing.unit_value = new_value;
-    }
-
-    Ok(Json(existing.clone()))
+    Ok(Json(asset))
 }
